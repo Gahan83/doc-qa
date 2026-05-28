@@ -89,30 +89,6 @@ Server starts at **http://127.0.0.1:8000**
 
 Open **http://127.0.0.1:8000/docs** for the Swagger UI.
 
-### PowerShell Examples
-
-**Ingest a document:**
-```powershell
-$form = @{ file = Get-Item ".\my-document.pdf" }
-Invoke-RestMethod -Uri http://127.0.0.1:8000/ingest -Method Post -Form $form
-```
-
-**Ask a question:**
-```powershell
-$body = @{ question = "What is this document about?"; top_k = 3 } | ConvertTo-Json
-Invoke-RestMethod -Uri http://127.0.0.1:8000/query -Method Post -Body $body -ContentType "application/json"
-```
-
-### cURL Examples
-
-```bash
-# Ingest
-curl -X POST http://127.0.0.1:8000/ingest -F "file=@document.pdf"
-
-# Query
-curl -X POST http://127.0.0.1:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Summarize the key points", "top_k": 3}'
 ```
 
 ## How It Works

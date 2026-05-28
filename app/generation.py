@@ -54,7 +54,7 @@ def generate(question: str, chunks: list[dict]) -> dict:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,  # Low temp = factual, deterministic answers
-        max_tokens=512,
+        max_completion_tokens=512,
     )
 
     return {
