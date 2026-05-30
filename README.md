@@ -18,7 +18,11 @@ doc-qa/
 │   ├── ingestion.py     # Read → chunk → embed → store pipeline
 │   ├── retrieval.py     # Embed query → cosine similarity → top-K results
 │   ├── generation.py    # Build RAG prompt → call GPT → return answer
-│   └── models.py        # Pydantic request/response schemas
+│   ├── models.py        # Pydantic request/response schemas
+│   ├── tools.py         # NEW: function calling tool definitions
+│   ├── agent.py         # NEW: ReAct agent loop
+│   ├── structured.py    # NEW: structured JSON outputs
+│   └── evaluation.py    # NEW: LLM-as-judge scoring
 ├── storage/             # Embeddings JSON store (created at runtime)
 ├── data/docs/           # Uploaded documents (created at runtime)
 ├── .env                 # Azure OpenAI credentials and config
@@ -83,21 +87,63 @@ Server starts at **http://127.0.0.1:8000**
 | POST   | `/ingest`| Upload a .txt or .pdf file |
 | POST   | `/query` | Ask a question about ingested documents |
 
-## Usage
+## Phase 2: Agents, Function Calling, Structured Outputs, Evaluation
 
-### Interactive Docs
-
-Open **http://127.0.0.1:8000/docs** for the Swagger UI.
+### New Architecture
 
 ```
+User Question
+   ↓
+Agent (LLM decides what to do)
+   ↓
+[Tools: search_documents, list_documents, get_document_summary]
+   ↓
+LLM can loop, call tools, and combine results
+   ↓
+Structured output or answer
+   ↓
+Optional: LLM-as-judge evaluation
+```
 
-## How It Works
+### New API Endpoints
 
-1. **Ingestion** — Files are read (PDF text extraction via PyPDF2), split into overlapping chunks (~500 words), embedded using Azure OpenAI's embedding model, and stored in `storage/embeddings.json`.
+| Method | Endpoint             | Description |
+|--------|----------------------|-------------|
+| POST   | `/agent`             | Agent with function calling and multi-step reasoning |
+| POST   | `/query/structured`  | Query with strict JSON output (answer, confidence, sources, follow-ups) |
+| POST   | `/evaluate`          | LLM-as-judge: score answer for faithfulness, relevance, completeness |
 
-2. **Retrieval** — The user's question is embedded with the same model. Cosine similarity is computed against all stored chunk embeddings using numpy, and the top-K most relevant chunks are returned.
+### Example: /evaluate
 
-3. **Generation** — The top-K chunks are injected into a structured prompt with a system message constraining GPT to answer only from the provided context. The response includes token usage for cost tracking.
+Request body:
+```json
+{
+  "question": "What is Azure Cognitive Services?",
+  "answer": "Azure Cognitive Services is a collection of AI services and APIs that help developers build intelligent applications without needing direct AI or data science skills.",
+  "context_chunks": [
+    {
+      "source": "AI-102 Exam - Free Actual Q&As, Page 1 _ ExamTopics_wd-compressed (1).pdf",
+      "text": "Azure Cognitive Services are cloud-based artificial intelligence (AI) services that help developers build cognitive intelligence into applications without having direct AI or data science skills or knowledge."
+    },
+    {
+      "source": "AI-102 Exam - Free Actual Q&As, Page 1 _ ExamTopics_wd-compressed (1).pdf",
+      "text": "Cognitive Services provides machine learning capabilities to solve general problems such as analyzing text for sentiment or analyzing images to recognize objects."
+    }
+  ]
+}
+```
+
+Response:
+```json
+{
+  "faithfulness": { "score": 5, "reason": "Answer directly paraphrases the context" },
+  "relevance": { "score": 5, "reason": "Directly answers what Azure Cognitive Services is" },
+  "completeness": { "score": 3, "reason": "Misses the machine learning capabilities and image/text analysis details" },
+  "overall_score": 4.3,
+  "summary": "Accurate but incomplete — covers the definition but omits specific capabilities mentioned in context.",
+  "eval_tokens": { "prompt_tokens": 312, "completion_tokens": 89 }
+}
+```
 
 ## Key Concepts Demonstrated
 
@@ -106,3 +152,10 @@ Open **http://127.0.0.1:8000/docs** for the Swagger UI.
 - **Embedding** and **cosine similarity** math from scratch
 - **Prompt engineering** — system prompt, context injection, grounding
 - **Token tracking** for cost awareness
+
+## Key Concepts Demonstrated (Phase 2)
+
+- **Function calling**: LLM can invoke Python tools for search, listing, and summarization
+- **Agent loop**: LLM can reason, call tools, observe, and iterate until it has an answer
+- **Structured outputs**: Force LLM to return JSON with answer, confidence, sources, follow-ups
+- **LLM-as-judge**: Automated answer evaluation for faithfulness, relevance, completeness
