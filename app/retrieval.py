@@ -3,7 +3,9 @@ Phase 1 — Retrieval: embed query → cosine similarity → top-K chunks.
 No vector DB. Pure numpy so you see the math.
 """
 
+
 import numpy as np
+from cachetools import LRUCache, cached
 
 from app.ingestion import embed_texts, load_store
 
@@ -24,6 +26,9 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(dot / norm)
 
 
+_retrieve_cache = LRUCache(maxsize=128)
+
+@cached(_retrieve_cache)
 def retrieve(question: str, top_k: int = 3) -> list[dict]:
     """
     1. Embed the question.
