@@ -1,12 +1,12 @@
 # Doc Q&A — RAG from Scratch
 
-A Retrieval-Augmented Generation (RAG) application built from scratch with **FastAPI** and **Azure OpenAI**. No LangChain, no vector databases — pure Python so you can see every step of the pipeline.
+A Retrieval-Augmented Generation (RAG) application built from scratch with **FastAPI**, **Azure OpenAI**, and **ChromaDB**. No LangChain — pure Python so you can see every step of the pipeline.
 
 ## Architecture
 
 ```
-Upload (.txt/.pdf) → Chunk text → Embed (Azure OpenAI) → Store (JSON)
-Ask question → Embed query → Cosine similarity (numpy) → Top-K chunks → GPT → Answer
+Upload (.txt/.pdf) → Chunk text → Embed (Azure OpenAI) → Store in ChromaDB
+Ask question → Embed query → ChromaDB vector search (HNSW + cosine) → Top-K chunks → GPT → Answer
 ```
 
 ## Project Structure
@@ -15,16 +15,18 @@ Ask question → Embed query → Cosine similarity (numpy) → Top-K chunks → 
 doc-qa/
 ├── app/
 │   ├── main.py          # FastAPI entrypoint with /ingest and /query endpoints
-│   ├── ingestion.py     # Read → chunk → embed → store pipeline
-│   ├── retrieval.py     # Embed query → cosine similarity → top-K results
+│   ├── ingestion.py     # Read → chunk → embed → store in ChromaDB
+│   ├── retrieval.py     # Embed query → ChromaDB vector search → top-K results
 │   ├── generation.py    # Build RAG prompt → call GPT → return answer
 │   ├── models.py        # Pydantic request/response schemas
-│   ├── tools.py         # NEW: function calling tool definitions
-│   ├── agent.py         # NEW: ReAct agent loop
-│   ├── structured.py    # NEW: structured JSON outputs
-│   └── evaluation.py    # NEW: LLM-as-judge scoring
-├── storage/             # Embeddings JSON store (created at runtime)
+│   ├── tools.py         # Function calling tool definitions
+│   ├── agent.py         # ReAct agent loop
+│   ├── structured.py    # Structured JSON outputs
+│   └── evaluation.py    # LLM-as-judge scoring
+├── storage/chromadb/    # ChromaDB persistent vector store (created at runtime)
 ├── data/docs/           # Uploaded documents (created at runtime)
+├── Dockerfile           # Production container image
+├── .dockerignore
 ├── .env                 # Azure OpenAI credentials and config
 ├── .gitignore
 ├── requirements.txt
@@ -145,11 +147,30 @@ Response:
 }
 ```
 
+## Vector Store: ChromaDB
+
+Replaces the original in-memory JSON store with a persistent, indexed vector database.
+
+**Why ChromaDB:**
+- Free, open-source, runs fully local — no API keys or accounts needed
+- Persistent storage in `storage/chromadb/` (survives restarts)
+- HNSW index → sub-millisecond retrieval even at millions of chunks
+- Built-in cosine similarity, metadata filtering, and deduplication
+- One-line query: `collection.query(query_embeddings=[...], n_results=k)`
+
+**What changed vs. the original JSON approach:**
+| | Before (JSON) | After (ChromaDB) |
+|---|---|---|
+| Storage | `storage/embeddings.json` (full file in RAM) | `storage/chromadb/` (disk-backed index) |
+| Retrieval | Linear scan + manual cosine | ANN search via HNSW |
+| Scale | ~10K chunks max | Millions of chunks |
+| Setup | None | `pip install chromadb` |
+
 ## Key Concepts Demonstrated
 
-- **RAG pipeline** end-to-end without frameworks
+- **RAG pipeline** end-to-end without heavy frameworks
 - **Chunking strategies** with overlap for context preservation
-- **Embedding** and **cosine similarity** math from scratch
+- **Embeddings** + **vector search** via ChromaDB (HNSW + cosine)
 - **Prompt engineering** — system prompt, context injection, grounding
 - **Token tracking** for cost awareness
 

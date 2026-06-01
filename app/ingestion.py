@@ -1,13 +1,14 @@
 """
 Phase 1 — Document ingestion: read → chunk → embed → store.
-No frameworks. Pure logic so you see every step.
+Uses ChromaDB for vector storage (replaces manual JSON store).
 """
 
-import json
 import os
 import re
+import uuid
 from pathlib import Path
 
+import chromadb
 import PyPDF2
 from openai import AzureOpenAI
 
@@ -17,10 +18,17 @@ client = AzureOpenAI(
     api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
 )
 
-STORAGE_PATH = Path("storage/embeddings.json")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 500))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+
+# --- ChromaDB Setup ---
+CHROMA_PATH = Path("storage/chromadb")
+chroma_client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+collection = chroma_client.get_or_create_collection(
+    name="doc_chunks",
+    metadata={"hnsw:space": "cosine"},  # Use cosine similarity
+)
 
 
 def read_file(path: str) -> str:
@@ -66,20 +74,27 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def load_store() -> list[dict]:
-    if STORAGE_PATH.exists():
-        return json.loads(STORAGE_PATH.read_text())
-    return []
+    """Load all documents from ChromaDB (for backward compatibility with tools.py)."""
+    results = collection.get(include=["documents", "metadatas", "embeddings"])
+    store = []
+    for i in range(len(results["ids"])):
+        store.append({
+            "source": results["metadatas"][i]["source"],
+            "text": results["documents"][i],
+            "embedding": results["embeddings"][i] if results["embeddings"] else [],
+        })
+    return store
 
 
 def save_store(store: list[dict]) -> None:
-    STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORAGE_PATH.write_text(json.dumps(store, indent=2))
+    """No-op: ChromaDB persists automatically. Kept for backward compatibility."""
+    pass
 
 
 def ingest_file(filepath: str) -> int:
     """
     Full ingestion pipeline:
-    read → chunk → embed → append to JSON store.
+    read → chunk → embed → store in ChromaDB.
     Returns number of chunks created.
     """
     filename = Path(filepath).name
@@ -91,13 +106,14 @@ def ingest_file(filepath: str) -> int:
 
     vectors = embed_texts(chunks)
 
-    store = load_store()
-    for chunk_text_val, vector in zip(chunks, vectors):
-        store.append({
-            "source": filename,
-            "text": chunk_text_val,
-            "embedding": vector,
-        })
+    # Generate unique IDs for each chunk
+    ids = [str(uuid.uuid4()) for _ in chunks]
 
-    save_store(store)
+    collection.add(
+        ids=ids,
+        documents=chunks,
+        embeddings=vectors,
+        metadatas=[{"source": filename} for _ in chunks],
+    )
+
     return len(chunks)

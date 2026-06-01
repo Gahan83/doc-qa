@@ -96,9 +96,11 @@ async def ingest(file: UploadFile = File(...)):
         raise HTTPException(400, f"Only {allowed} supported")
     dest = UPLOAD_DIR / file.filename
     try:
-        # Async file write
-        async with asyncio.to_thread(open, dest, "wb") as f:
-            await asyncio.to_thread(shutil.copyfileobj, file.file, f)
+        # Write uploaded file to disk in a threadpool (file I/O is blocking)
+        def _save_upload():
+            with open(dest, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+        await run_in_threadpool(_save_upload)
         # Ingestion is CPU-bound, run in threadpool
         chunks_count = await run_in_threadpool(ingest_file, str(dest))
         return IngestResponse(
