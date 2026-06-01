@@ -1,64 +1,39 @@
 """
-Phase 1 — Generation: build prompt → call GPT → return answer + token counts.
-Prompt engineering concepts live here: system role, context injection, instruction.
+Phase 1 — Generation using LangChain ChatPromptTemplate + AzureChatOpenAI.
 """
 
-import os
+from langchain_core.prompts import ChatPromptTemplate
 
-from openai import AzureOpenAI
+from app.llm import get_chat_llm
 
-client = AzureOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
-)
-
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-
-# --- PROMPT ENGINEERING ZONE ---
-# System prompt sets the model's persona + constraints.
-# This is where prompt engineering begins — tweak this and watch behavior change.
 SYSTEM_PROMPT = """You are a precise document assistant.
 Answer ONLY from the provided context chunks.
 If the answer is not in the context, say "I don't have enough information."
 Be concise. Cite the source filename when relevant."""
 
+PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    ("user", "CONTEXT:\n{context}\n\nQUESTION: {question}\n\nAnswer based only on the context above."),
+])
 
-def build_prompt(question: str, chunks: list[dict]) -> str:
-    """
-    Few-shot RAG prompt pattern:
-    CONTEXT block → QUESTION → instruction to answer only from context.
-    """
-    context_block = "\n\n---\n\n".join(
-        f"[Source: {c['source']}]\n{c['text']}" for c in chunks
-    )
-    return f"""CONTEXT:
-{context_block}
 
-QUESTION: {question}
-
-Answer based only on the context above."""
+def format_context(chunks: list[dict]) -> str:
+    return "\n\n---\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in chunks)
 
 
 def generate(question: str, chunks: list[dict]) -> dict:
-    """
-    Call GPT with system prompt + user prompt.
-    Returns answer string + token usage for cost tracking.
-    """
-    user_prompt = build_prompt(question, chunks)
+    """Call GPT via LangChain chain. Returns answer + token usage."""
+    llm = get_chat_llm(temperature=0.2, max_tokens=512)
+    chain = PROMPT | llm
 
-    response = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,  # Low temp = factual, deterministic answers
-        max_completion_tokens=512,
-    )
+    response = chain.invoke({
+        "context": format_context(chunks),
+        "question": question,
+    })
 
+    usage = response.usage_metadata or {}
     return {
-        "answer": response.choices[0].message.content,
-        "prompt_tokens": response.usage.prompt_tokens,
-        "completion_tokens": response.usage.completion_tokens,
+        "answer": response.content,
+        "prompt_tokens": usage.get("input_tokens", 0),
+        "completion_tokens": usage.get("output_tokens", 0),
     }

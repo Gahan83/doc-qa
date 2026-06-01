@@ -3,8 +3,14 @@ uvicorn==0.30.6
 openai>=1.68.0
 python-dotenv==1.0.1
 pypdf2==3.0.1
+pypdf>=4.0.0
 numpy==1.26.4
 pydantic==2.9.2
 python-multipart==0.0.12
 cachetools>=5.3.0
 chromadb>=1.0.0
+langchain>=1.0.0
+langchain-openai>=1.0.0
+langchain-community>=0.3.0
+langchain-chroma>=1.0.0
+langchain-text-splitters>=0.3.0

@@ -1,33 +1,26 @@
 """
-Phase 2 — Structured Outputs: force GPT to return validated JSON.
-Uses response_format to guarantee schema compliance.
+Phase 2 — Structured Outputs using LangChain's with_structured_output().
+Pydantic schema is enforced automatically.
 """
 
-import json
-import os
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
-from openai import AzureOpenAI
+from app.generation import format_context
+from app.llm import get_chat_llm
 
-from app.generation import build_prompt
 
-client = AzureOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
-)
+class StructuredAnswerSchema(BaseModel):
+    answer: str = Field(description="Concise answer based only on the context")
+    confidence: float = Field(
+        description="0.0 to 1.0 — how well the context supports the answer", ge=0.0, le=1.0
+    )
+    sources_cited: list[str] = Field(description="Filenames cited in the answer")
+    follow_up_questions: list[str] = Field(description="2-3 suggested follow-up questions")
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 
 STRUCTURED_SYSTEM_PROMPT = """You are a precise document assistant.
 Answer ONLY from the provided context chunks.
-
-You MUST respond in this exact JSON format:
-{
-    "answer": "<your concise answer>",
-    "confidence": <0.0 to 1.0 based on how well context supports the answer>,
-    "sources_cited": ["<filename1>", "<filename2>"],
-    "follow_up_questions": ["<suggested question 1>", "<suggested question 2>"]
-}
 
 Rules:
 - confidence 0.9+ = answer is clearly stated in context
@@ -35,38 +28,29 @@ Rules:
 - confidence <0.5 = context barely supports the answer
 - Always suggest 2-3 follow-up questions the user might ask"""
 
+PROMPT = ChatPromptTemplate.from_messages([
+    ("system", STRUCTURED_SYSTEM_PROMPT),
+    ("user", "CONTEXT:\n{context}\n\nQUESTION: {question}\n\nAnswer based only on the context above."),
+])
+
 
 def generate_structured(question: str, chunks: list[dict]) -> dict:
-    """
-    Generate a structured JSON answer with confidence and metadata.
-    Uses response_format=json_object to enforce valid JSON output.
-    """
-    user_prompt = build_prompt(question, chunks)
+    """Generate a Pydantic-validated structured response."""
+    llm = get_chat_llm(temperature=0.2, max_tokens=512)
+    structured_llm = llm.with_structured_output(StructuredAnswerSchema, include_raw=True)
+    chain = PROMPT | structured_llm
 
-    response = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": STRUCTURED_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-        max_completion_tokens=512,
-        response_format={"type": "json_object"},
-    )
+    result = chain.invoke({
+        "context": format_context(chunks),
+        "question": question,
+    })
 
-    raw = response.choices[0].message.content
+    parsed: StructuredAnswerSchema = result["parsed"]
+    raw_response = result["raw"]
+    usage = raw_response.usage_metadata or {}
 
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        parsed = {
-            "answer": raw,
-            "confidence": 0.0,
-            "sources_cited": [],
-            "follow_up_questions": [],
-        }
-
-    parsed["prompt_tokens"] = response.usage.prompt_tokens
-    parsed["completion_tokens"] = response.usage.completion_tokens
-
-    return parsed
+    return {
+        **parsed.model_dump(),
+        "prompt_tokens": usage.get("input_tokens", 0),
+        "completion_tokens": usage.get("output_tokens", 0),
+    }

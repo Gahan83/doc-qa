@@ -1,12 +1,12 @@
-# Doc Q&A — RAG from Scratch
+# Doc Q&A — RAG with LangChain + ChromaDB
 
-A Retrieval-Augmented Generation (RAG) application built from scratch with **FastAPI**, **Azure OpenAI**, and **ChromaDB**. No LangChain — pure Python so you can see every step of the pipeline.
+A Retrieval-Augmented Generation (RAG) application built with **FastAPI**, **LangChain**, **Azure OpenAI**, and **ChromaDB**.
 
 ## Architecture
 
 ```
-Upload (.txt/.pdf) → Chunk text → Embed (Azure OpenAI) → Store in ChromaDB
-Ask question → Embed query → ChromaDB vector search (HNSW + cosine) → Top-K chunks → GPT → Answer
+Upload (.txt/.pdf) → LangChain loaders → text splitter → embed (Azure OpenAI) → store in ChromaDB
+Ask question → LangChain similarity search → Top-K chunks → LangChain prompt chain → GPT → Answer
 ```
 
 ## Project Structure
@@ -14,15 +14,16 @@ Ask question → Embed query → ChromaDB vector search (HNSW + cosine) → Top-
 ```
 doc-qa/
 ├── app/
-│   ├── main.py          # FastAPI entrypoint with /ingest and /query endpoints
-│   ├── ingestion.py     # Read → chunk → embed → store in ChromaDB
-│   ├── retrieval.py     # Embed query → ChromaDB vector search → top-K results
-│   ├── generation.py    # Build RAG prompt → call GPT → return answer
+│   ├── main.py          # FastAPI entrypoint with /ingest, /query, /agent, /query/structured, /evaluate
+│   ├── llm.py           # Centralized LangChain Azure LLM, embeddings, and Chroma vectorstore setup
+│   ├── ingestion.py     # LangChain loaders + text splitter + Chroma document ingestion
+│   ├── retrieval.py     # LangChain Chroma similarity search (top-K)
+│   ├── generation.py    # LangChain prompt template + chain invocation
 │   ├── models.py        # Pydantic request/response schemas
-│   ├── tools.py         # Function calling tool definitions
-│   ├── agent.py         # ReAct agent loop
-│   ├── structured.py    # Structured JSON outputs
-│   └── evaluation.py    # LLM-as-judge scoring
+│   ├── tools.py         # LangChain @tool definitions
+│   ├── agent.py         # LangChain bind_tools() agent loop
+│   ├── structured.py    # with_structured_output() responses
+│   └── evaluation.py    # LLM-as-judge with structured output
 ├── storage/chromadb/    # ChromaDB persistent vector store (created at runtime)
 ├── data/docs/           # Uploaded documents (created at runtime)
 ├── Dockerfile           # Production container image
@@ -85,7 +86,8 @@ Server starts at **http://127.0.0.1:8000**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET    | `/`      | Health check |
+| GET    | `/`      | Service metadata |
+| GET    | `/healthz`| Liveness/readiness health check |
 | POST   | `/ingest`| Upload a .txt or .pdf file |
 | POST   | `/query` | Ask a question about ingested documents |
 
@@ -156,7 +158,7 @@ Replaces the original in-memory JSON store with a persistent, indexed vector dat
 - Persistent storage in `storage/chromadb/` (survives restarts)
 - HNSW index → sub-millisecond retrieval even at millions of chunks
 - Built-in cosine similarity, metadata filtering, and deduplication
-- One-line query: `collection.query(query_embeddings=[...], n_results=k)`
+- One-line LangChain retrieval: `vectorstore.similarity_search_with_score(query, k=top_k)`
 
 **What changed vs. the original JSON approach:**
 | | Before (JSON) | After (ChromaDB) |
@@ -168,15 +170,15 @@ Replaces the original in-memory JSON store with a persistent, indexed vector dat
 
 ## Key Concepts Demonstrated
 
-- **RAG pipeline** end-to-end without heavy frameworks
-- **Chunking strategies** with overlap for context preservation
-- **Embeddings** + **vector search** via ChromaDB (HNSW + cosine)
-- **Prompt engineering** — system prompt, context injection, grounding
+- **RAG pipeline** end-to-end with LangChain + ChromaDB
+- **LangChain loaders and splitters** for robust ingestion
+- **Embeddings** + **vector search** via LangChain Chroma integration
+- **Prompt chaining** with `ChatPromptTemplate`
 - **Token tracking** for cost awareness
 
 ## Key Concepts Demonstrated (Phase 2)
 
-- **Function calling**: LLM can invoke Python tools for search, listing, and summarization
-- **Agent loop**: LLM can reason, call tools, observe, and iterate until it has an answer
-- **Structured outputs**: Force LLM to return JSON with answer, confidence, sources, follow-ups
-- **LLM-as-judge**: Automated answer evaluation for faithfulness, relevance, completeness
+- **Function calling**: LangChain `@tool`-based tools with auto-generated schemas
+- **Agent loop**: LangChain `bind_tools()` with tool-call and tool-message handling
+- **Structured outputs**: `with_structured_output()` + Pydantic validation
+- **LLM-as-judge**: Automated answer evaluation with typed schema output

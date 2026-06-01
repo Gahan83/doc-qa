@@ -1,23 +1,16 @@
 """
-Phase 2 — Agent: ReAct-style loop with function calling.
-GPT decides which tools to call, observes results, and loops until it has an answer.
+Phase 2 — Agent loop using LangChain's bind_tools().
+LLM picks tools, we execute them, loop until final answer.
 """
 
 import json
-import os
 
-from openai import AzureOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from app.tools import TOOL_SCHEMAS, execute_tool
+from app.llm import get_chat_llm
+from app.tools import TOOLS, TOOLS_BY_NAME
 
-client = AzureOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
-)
-
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-MAX_ITERATIONS = 5  # Safety limit to prevent infinite loops
+MAX_ITERATIONS = 5
 
 AGENT_SYSTEM_PROMPT = """You are a document assistant agent with access to tools.
 
@@ -36,17 +29,13 @@ Rules:
 
 
 def run_agent(question: str) -> dict:
-    """
-    Run the agent loop:
-    1. Send question + tools to GPT
-    2. If GPT returns tool_calls → execute them → feed results back
-    3. Repeat until GPT returns a final text answer (or max iterations hit)
+    """LangChain tool-calling agent loop. Returns answer, steps, and token usage."""
+    llm = get_chat_llm(temperature=0.2, max_tokens=1024)
+    llm_with_tools = llm.bind_tools(TOOLS)
 
-    Returns: answer, steps taken, and token usage.
-    """
     messages = [
-        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
+        SystemMessage(content=AGENT_SYSTEM_PROMPT),
+        HumanMessage(content=question),
     ]
 
     steps = []
@@ -54,52 +43,38 @@ def run_agent(question: str) -> dict:
     total_completion_tokens = 0
 
     for iteration in range(MAX_ITERATIONS):
-        response = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-            temperature=0.2,
-            max_completion_tokens=1024,
-        )
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
 
-        total_prompt_tokens += response.usage.prompt_tokens
-        total_completion_tokens += response.usage.completion_tokens
+        usage = response.usage_metadata or {}
+        total_prompt_tokens += usage.get("input_tokens", 0)
+        total_completion_tokens += usage.get("output_tokens", 0)
 
-        choice = response.choices[0]
+        # If the model wants to call tools
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                args = tool_call["args"]
 
-        # If GPT wants to call tools
-        if choice.finish_reason == "tool_calls":
-            messages.append(choice.message)
-
-            for tool_call in choice.message.tool_calls:
-                tool_name = tool_call.function.name
-                arguments = json.loads(tool_call.function.arguments)
-
-                result = execute_tool(tool_name, arguments)
+                tool_fn = TOOLS_BY_NAME.get(tool_name)
+                if tool_fn is None:
+                    result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+                else:
+                    result = json.dumps(tool_fn.invoke(args), default=str)
 
                 steps.append({
                     "iteration": iteration + 1,
                     "tool": tool_name,
-                    "arguments": arguments,
+                    "arguments": args,
                     "result_preview": result[:200],
                 })
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-        # If GPT returns a final answer
+                messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
         else:
-            answer = choice.message.content
-            steps.append({
-                "iteration": iteration + 1,
-                "action": "final_answer",
-            })
+            # Final answer
+            steps.append({"iteration": iteration + 1, "action": "final_answer"})
             return {
-                "answer": answer,
+                "answer": response.content,
                 "steps": steps,
                 "iterations": iteration + 1,
                 "prompt_tokens": total_prompt_tokens,
@@ -107,7 +82,7 @@ def run_agent(question: str) -> dict:
             }
 
     return {
-        "answer": "Reached maximum reasoning steps. Please refine your question.",
+        "answer": "Max iterations reached without final answer.",
         "steps": steps,
         "iterations": MAX_ITERATIONS,
         "prompt_tokens": total_prompt_tokens,
