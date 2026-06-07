@@ -9,7 +9,7 @@ from app.llm import get_chat_llm
 SYSTEM_PROMPT = """You are a precise document assistant.
 Answer ONLY from the provided context chunks.
 If the answer is not in the context, say "I don't have enough information."
-Be concise. Cite the source filename when relevant."""
+Be concise. When citing sources, include the timestamp for audio/video (e.g. "from podcast.mp3 at 03:42")."""
 
 PROMPT = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_PROMPT),
@@ -18,7 +18,12 @@ PROMPT = ChatPromptTemplate.from_messages([
 
 
 def format_context(chunks: list[dict]) -> str:
-    return "\n\n---\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in chunks)
+    parts = []
+    for c in chunks:
+        ts = c.get("timestamp_label")
+        label = f"[Source: {c['source']}{f' @ {ts}' if ts else ''}]"
+        parts.append(f"{label}\n{c['text']}")
+    return "\n\n---\n\n".join(parts)
 
 
 def generate(question: str, chunks: list[dict]) -> dict:

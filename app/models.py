@@ -19,6 +19,10 @@ class SourceChunk(BaseModel):
     text: str
     source: str
     score: float
+    # Phase 4: timestamp fields — None for non-audio sources
+    start: Optional[float] = None
+    end: Optional[float] = None
+    timestamp_label: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -77,3 +81,32 @@ class EvalResponse(BaseModel):
     overall_score: float
     summary: str
     eval_tokens: dict
+
+
+# --- Phase 3/4: Audio/video ingest ---
+
+class AudioIngestResponse(BaseModel):
+    filename: str
+    chunks_created: int
+    duration_seconds: Optional[float] = None
+    message: str
+
+
+# --- Phase 9: Voice I/O ---
+
+class VoiceSpeakRequest(BaseModel):
+    text: str
+    voice: str = "alloy"  # alloy | echo | fable | onyx | nova | shimmer
+
+
+class TranscriptSegment(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    language: str
+    duration: float
+    segments: list[TranscriptSegment]

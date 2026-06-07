@@ -21,9 +21,13 @@ def retrieve(question: str, top_k: int = 3) -> list[dict]:
     # Chroma returns cosine distance (lower = better); convert to similarity
     return [
         {
-            "source": doc.metadata.get("source", "unknown"),
-            "text": doc.page_content,
-            "score": round(1 - distance, 4),
+            "source":          doc.metadata.get("source", "unknown"),
+            "text":            doc.page_content,
+            "score":           round(1 - distance, 4),
+            # Phase 4: timestamps — present for audio/video chunks, absent for PDFs
+            "start":           doc.metadata.get("start"),
+            "end":             doc.metadata.get("end"),
+            "timestamp_label": doc.metadata.get("timestamp_label"),
         }
         for doc, distance in results
     ]

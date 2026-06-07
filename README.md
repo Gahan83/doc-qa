@@ -1,12 +1,32 @@
-# Doc Q&A — RAG with LangChain + ChromaDB
+# Doc Q&A — RAG over Documents, Audio & Video
 
-A Retrieval-Augmented Generation (RAG) application built with **FastAPI**, **LangChain**, **Azure OpenAI**, and **ChromaDB**.
+A Retrieval-Augmented Generation (RAG) application built with **FastAPI**, **LangChain**, **Azure OpenAI**, and **ChromaDB**. Ingests PDFs, text, audio, and video. Answers cite timestamps. Talks and listens.
 
 ## Architecture
 
 ```
-Upload (.txt/.pdf) → LangChain loaders → text splitter → embed (Azure OpenAI) → store in ChromaDB
-Ask question → LangChain similarity search → Top-K chunks → LangChain prompt chain → GPT → Answer
+                        ┌─────────────────────────────────────────┐
+                        │              INGEST PIPELINE            │
+                        │                                         │
+  PDF / TXT ────────────► LangChain loaders → text splitter       │
+  MP3 / WAV / M4A ──────► ffmpeg → Whisper → timestamp chunks     │
+  MP4 / MOV / MKV ──────► ffmpeg audio → Whisper                  │
+                        │ ffmpeg frames → GPT-4o vision           │
+                        │ ffmpeg frames → CLIP embeddings         │
+                        └──────────────┬──────────────────────────┘
+                                       │ embed (Azure OpenAI)
+                                       ▼
+                                  ChromaDB
+                                       │
+                        ┌──────────────▼──────────────────────────┐
+                        │              QUERY PIPELINE              │
+  Question ─────────────► similarity search → top-K chunks        │
+                        │ format context (with timestamps)         │
+                        │ GPT → answer citing "file.mp3 @ 03:42"  │
+                        └──────────────────────────────────────────┘
+
+  Voice loop:
+  Mic → /voice/transcribe (Whisper) → /agent → /voice/speak (TTS) → Speaker
 ```
 
 ## Project Structure
@@ -14,22 +34,30 @@ Ask question → LangChain similarity search → Top-K chunks → LangChain prom
 ```
 doc-qa/
 ├── app/
-│   ├── main.py          # FastAPI entrypoint with /ingest, /query, /agent, /query/structured, /evaluate
-│   ├── llm.py           # Centralized LangChain Azure LLM, embeddings, and Chroma vectorstore setup
-│   ├── ingestion.py     # LangChain loaders + text splitter + Chroma document ingestion
-│   ├── retrieval.py     # LangChain Chroma similarity search (top-K)
-│   ├── generation.py    # LangChain prompt template + chain invocation
-│   ├── models.py        # Pydantic request/response schemas
-│   ├── tools.py         # LangChain @tool definitions
-│   ├── agent.py         # LangChain bind_tools() agent loop
-│   ├── structured.py    # with_structured_output() responses
-│   └── evaluation.py    # LLM-as-judge with structured output
-├── storage/chromadb/    # ChromaDB persistent vector store (created at runtime)
-├── data/docs/           # Uploaded documents (created at runtime)
-├── Dockerfile           # Production container image
-├── .dockerignore
-├── .env                 # Azure OpenAI credentials and config
-├── .gitignore
+│   ├── main.py           # FastAPI app setup, middleware, router mounting
+│   ├── endpoints.py      # APIRouter with all HTTP endpoints
+│   ├── llm.py            # Azure LLM, embeddings, Chroma setup
+│   ├── ingestion.py      # Routes PDF/TXT/audio/video to correct loader
+│   ├── retrieval.py      # Chroma similarity search (returns timestamps)
+│   ├── generation.py     # Prompt chain — cites "file @ MM:SS"
+│   ├── models.py         # Pydantic schemas for all endpoints
+│   ├── audio_loader.py   # Whisper transcription → timestamp chunks (Phase 2+5)
+│   ├── video_loader.py   # Audio rip + GPT-4o frame descriptions (Phase 6+7)
+│   ├── clip_store.py     # CLIP visual embeddings, separate collection (Phase 8)
+│   ├── voice.py          # TTS synthesis + raw transcription (Phase 9)
+│   ├── agent.py          # LangChain bind_tools() agent loop
+│   ├── tools.py          # @tool definitions for the agent
+│   ├── structured.py     # with_structured_output() responses
+│   └── evaluation.py     # LLM-as-judge scoring
+├── data/
+│   ├── docs/             # Uploaded PDFs and text files
+│   ├── audio/            # Uploaded audio files
+│   └── video/            # Uploaded video files
+├── storage/chromadb/     # Persistent vector store (text + visual collections)
+├── test_whisper.py       # Phase 1 — one-shot Whisper proof script
+├── test_e2e.py           # End-to-end TTS → Whisper → ingest → query → TTS
+├── Dockerfile
+├── .env
 ├── requirements.txt
 └── README.md
 ```
@@ -39,146 +67,68 @@ doc-qa/
 ### Prerequisites
 
 - Python 3.10+
-- Azure OpenAI resource with:
-  - An embedding model deployment (`text-embedding-3-small`)
-  - A chat model deployment (`gpt-4o-mini`)
+- ffmpeg (installed at path set in `FFMPEG_PATH`)
+- Azure OpenAI resource(s) with these deployments:
+
+| Deployment name          | Model                   | Used for                    |
+|--------------------------|-------------------------|-----------------------------|
+| `text-embedding-3-small` | text-embedding-3-small  | Document + audio embeddings |
+| `gpt-5.4-mini`           | gpt-5.4-mini            | Chat, agent, evaluation     |
+| `whisper`                | whisper                 | Audio/video transcription   |
+| `tts`                    | tts-1                   | Text-to-speech              |
+
+> TTS may need a separate Azure region (Sweden Central has it; West Europe may not).
 
 ### Installation
 
 ```bash
-# Clone the repo
 git clone <repo-url>
 cd doc-qa
-
-# Create virtual environment
 python -m venv venv
 venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
-
-# Install dependencies
+source venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+Swagger UI: **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**
 ```
-
-### Configuration
-
-Create a `.env` file in the project root:
-
-```env
-OPENAI_API_KEY=<your-azure-openai-key>
-AZURE_OPENAI_ENDPOINT=<your-azure-endpoint>
-AZURE_API_VERSION=2024-12-01-preview
-EMBED_MODEL=text-embedding-3-small
-CHAT_MODEL=emi-gpt-4o-mini
-CHUNK_SIZE=500
-CHUNK_OVERLAP=50
-TOP_K=3
-```
-
-## Running the Application
-
-```bash
-uvicorn app.main:app --reload
-```
-
-Server starts at **http://127.0.0.1:8000**
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET    | `/`      | Service metadata |
-| GET    | `/healthz`| Liveness/readiness health check |
-| POST   | `/ingest`| Upload a .txt or .pdf file |
-| POST   | `/query` | Ask a question about ingested documents |
+### Ingest
 
-## Phase 2: Agents, Function Calling, Structured Outputs, Evaluation
+| Method | Endpoint         | Description                                                       |
+|--------|------------------|-------------------------------------------------------------------|
+| POST   | `/ingest`        | Upload PDF, TXT, MP3, WAV, M4A, OGG, FLAC, MP4, MOV, MKV, WEBM    |
+| POST   | `/ingest/visual` | Embed video frames via CLIP into a separate Chroma collection     |
 
-### New Architecture
+Audio/video ingest runs Whisper automatically. Video also runs GPT-4o frame descriptions if `VISUAL_MODE=describe`.
 
-```
-User Question
-   ↓
-Agent (LLM decides what to do)
-   ↓
-[Tools: search_documents, list_documents, get_document_summary]
-   ↓
-LLM can loop, call tools, and combine results
-   ↓
-Structured output or answer
-   ↓
-Optional: LLM-as-judge evaluation
-```
+### Query
 
-### New API Endpoints
+| Method | Endpoint              | Description                                              |
+|--------|-----------------------|----------------------------------------------------------|
+| POST   | `/query`              | RAG with timestamp citations for audio and video         |
+| POST   | `/query/visual`       | CLIP frame search over ingested video (Phase 8)          |
+| POST   | `/query/structured`   | Returns JSON with confidence and follow-up questions     |
+| POST   | `/agent`              | Tool-calling agent, loops until it has an answer         |
+| POST   | `/evaluate`           | LLM-as-judge: faithfulness, relevance, completeness      |
 
-| Method | Endpoint             | Description |
-|--------|----------------------|-------------|
-| POST   | `/agent`             | Agent with function calling and multi-step reasoning |
-| POST   | `/query/structured`  | Query with strict JSON output (answer, confidence, sources, follow-ups) |
-| POST   | `/evaluate`          | LLM-as-judge: score answer for faithfulness, relevance, completeness |
+### Voice
 
-### Example: /evaluate
+| Method | Endpoint              | Description                                                    |
+|--------|-----------------------|----------------------------------------------------------------|
+| POST   | `/voice/transcribe`   | Upload audio to get timestamped transcript, no storage         |
+| POST   | `/voice/speak`        | {text, voice} in request body, returns MP3 audio bytes         |
 
-Request body:
-```json
-{
-  "question": "What is Azure Cognitive Services?",
-  "answer": "Azure Cognitive Services is a collection of AI services and APIs that help developers build intelligent applications without needing direct AI or data science skills.",
-  "context_chunks": [
-    {
-      "source": "AI-102 Exam - Free Actual Q&As, Page 1 _ ExamTopics_wd-compressed (1).pdf",
-      "text": "Azure Cognitive Services are cloud-based artificial intelligence (AI) services that help developers build cognitive intelligence into applications without having direct AI or data science skills or knowledge."
-    },
-    {
-      "source": "AI-102 Exam - Free Actual Q&As, Page 1 _ ExamTopics_wd-compressed (1).pdf",
-      "text": "Cognitive Services provides machine learning capabilities to solve general problems such as analyzing text for sentiment or analyzing images to recognize objects."
-    }
-  ]
-}
-```
 
-Response:
-```json
-{
-  "faithfulness": { "score": 5, "reason": "Answer directly paraphrases the context" },
-  "relevance": { "score": 5, "reason": "Directly answers what Azure Cognitive Services is" },
-  "completeness": { "score": 3, "reason": "Misses the machine learning capabilities and image/text analysis details" },
-  "overall_score": 4.3,
-  "summary": "Accurate but incomplete — covers the definition but omits specific capabilities mentioned in context.",
-  "eval_tokens": { "prompt_tokens": 312, "completion_tokens": 89 }
-}
-```
 
-## Vector Store: ChromaDB
+## Key Concepts
 
-Replaces the original in-memory JSON store with a persistent, indexed vector database.
-
-**Why ChromaDB:**
-- Free, open-source, runs fully local — no API keys or accounts needed
-- Persistent storage in `storage/chromadb/` (survives restarts)
-- HNSW index → sub-millisecond retrieval even at millions of chunks
-- Built-in cosine similarity, metadata filtering, and deduplication
-- One-line LangChain retrieval: `vectorstore.similarity_search_with_score(query, k=top_k)`
-
-**What changed vs. the original JSON approach:**
-| | Before (JSON) | After (ChromaDB) |
-|---|---|---|
-| Storage | `storage/embeddings.json` (full file in RAM) | `storage/chromadb/` (disk-backed index) |
-| Retrieval | Linear scan + manual cosine | ANN search via HNSW |
-| Scale | ~10K chunks max | Millions of chunks |
-| Setup | None | `pip install chromadb` |
-
-## Key Concepts Demonstrated
-
-- **RAG pipeline** end-to-end with LangChain + ChromaDB
-- **LangChain loaders and splitters** for robust ingestion
-- **Embeddings** + **vector search** via LangChain Chroma integration
-- **Prompt chaining** with `ChatPromptTemplate`
-- **Token tracking** for cost awareness
-
-## Key Concepts Demonstrated (Phase 2)
-
-- **Function calling**: LangChain `@tool`-based tools with auto-generated schemas
-- **Agent loop**: LangChain `bind_tools()` with tool-call and tool-message handling
-- **Structured outputs**: `with_structured_output()` + Pydantic validation
-- **LLM-as-judge**: Automated answer evaluation with typed schema output
+- **RAG pipeline** — LangChain + ChromaDB, timestamps flow through retrieval → prompt → answer
+- **Whisper** — converts any audio/video to searchable text with segment-level timestamps
+- **Long-file handling** — ffmpeg slices files >20 MB; timestamps stitched back as absolute
+- **GPT-4o vision** — describes video frames; descriptions embedded and searchable
+- **CLIP embeddings** — images and text in same vector space; no description step needed
+- **Agent loop** — `bind_tools()` lets GPT decide which tools to call and loop until done
+- **LLM-as-judge** — structured evaluation of faithfulness, relevance, completeness
+- **Voice loop** — mic audio → Whisper → agent → TTS → speaker; same brain, new senses
