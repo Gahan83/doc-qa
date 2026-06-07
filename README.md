@@ -4,29 +4,85 @@ A Retrieval-Augmented Generation (RAG) application built with **FastAPI**, **Lan
 
 ## Architecture
 
-```
-                        ┌─────────────────────────────────────────┐
-                        │              INGEST PIPELINE            │
-                        │                                         │
-  PDF / TXT ────────────► LangChain loaders → text splitter       │
-  MP3 / WAV / M4A ──────► ffmpeg → Whisper → timestamp chunks     │
-  MP4 / MOV / MKV ──────► ffmpeg audio → Whisper                  │
-                        │ ffmpeg frames → GPT-4o vision           │
-                        │ ffmpeg frames → CLIP embeddings         │
-                        └──────────────┬──────────────────────────┘
-                                       │ embed (Azure OpenAI)
-                                       ▼
-                                  ChromaDB
-                                       │
-                        ┌──────────────▼──────────────────────────┐
-                        │              QUERY PIPELINE              │
-  Question ─────────────► similarity search → top-K chunks        │
-                        │ format context (with timestamps)         │
-                        │ GPT → answer citing "file.mp3 @ 03:42"  │
-                        └──────────────────────────────────────────┘
+### Ingest pipeline (shared by both flows)
 
-  Voice loop:
-  Mic → /voice/transcribe (Whisper) → /agent → /voice/speak (TTS) → Speaker
+```
+  PDF / TXT ────────────► LangChain loaders → text splitter      ┐
+  MP3 / WAV / M4A ──────► ffmpeg → Whisper → timestamp chunks    │
+  MP4 / MOV / MKV ──────► ffmpeg audio  → Whisper                ├─► embed (Azure OpenAI) ─► ChromaDB
+                          ffmpeg frames → GPT-4o vision          │
+                          ffmpeg frames → CLIP embeddings        ┘
+```
+
+### Normal flow — `POST /query` (deterministic RAG)
+
+```
+  Question
+     │
+     ▼
+  retrieve(top_k)  ───►  Chroma similarity search
+     │
+     ▼
+  format context (with timestamps)
+     │
+     ▼
+  GPT (single call) ───► answer citing "file.mp3 @ 03:42"
+     │
+     ▼
+  QueryResponse { answer, sources, tokens }
+```
+
+Properties: one LLM call, no tools, no looping. Fast, cheap, predictable.
+Use for direct factual Q&A over indexed content.
+
+### Agentic flow — `POST /agent` (decision loop)
+
+```
+  Question  +  optional session_id
+       │
+       ▼
+  load short-term memory (recent turns)            ◄── app/memory_store.py
+       │
+       ▼
+  ┌─────────────────────────  agent loop  ────────────────────────────┐
+  │                                                                   │
+  │   LLM (bind_tools)  ──► tool_calls?                               │
+  │       │                    │                                      │
+  │       │ no                 │ yes                                  │
+  │       ▼                    ▼                                      │
+  │   final answer       for each tool_call:                          │
+  │                          ├─ plan_step          (first, if needed) │
+  │                          ├─ search_documents  / list / summary    │
+  │                          ├─ remember / recall  (long-term facts)  │
+  │                          │                                        │
+  │                          ▼                                        │
+  │                     invoke_with_retry                             │
+  │                       │  envelope { status, retryable, ... }      │
+  │                       │   ├─ ok       ─► append ToolMessage       │
+  │                       │   ├─ retry    ─► backoff, try again       │
+  │                       │   └─ fail     ─► tell model, fallback     │
+  │                       ▼                                           │
+  │                  step trace (latency, retries, tokens)            │
+  │                                                                   │
+  │   safety rails: MAX_ITERATIONS / MAX_TOOL_CALLS / MAX_WALL_SECONDS│
+  │   on cap hit ─► safe-stop response (partial + stop_reason)        │
+  └───────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  AgentResponse { answer, plan, steps[], trace_id, session_id,
+                  stop_reason, elapsed_ms, tool_calls, tokens }
+       │
+       ▼
+  append (user, assistant) turns to short-term memory
+```
+
+Properties: planning, tool selection, retries, memory, guardrails, full trace.
+Use for ambiguous or multi-step requests where the right tool sequence isn't obvious.
+
+### Voice loop
+
+```
+  Mic ─► /voice/transcribe (Whisper) ─► /query OR /agent ─► /voice/speak (TTS) ─► Speaker
 ```
 
 ## Project Structure
@@ -45,8 +101,9 @@ doc-qa/
 │   ├── video_loader.py   # Audio rip + GPT-4o frame descriptions (Phase 6+7)
 │   ├── clip_store.py     # CLIP visual embeddings, separate collection (Phase 8)
 │   ├── voice.py          # TTS synthesis + raw transcription (Phase 9)
-│   ├── agent.py          # LangChain bind_tools() agent loop
-│   ├── tools.py          # @tool definitions for the agent
+│   ├── agent.py          # Agentic loop: plan → tools → retry → trace → safe-stop
+│   ├── tools.py          # @tool definitions with standardized result envelope
+│   ├── memory_store.py   # Short-term session buffer + long-term JSON facts
 │   ├── structured.py     # with_structured_output() responses
 │   └── evaluation.py     # LLM-as-judge scoring
 ├── data/
@@ -92,6 +149,67 @@ uvicorn app.main:app --reload --port 8000
 Swagger UI: **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**
 ```
 
+## Manual Testing (No Test Files)
+
+Use these steps to validate the app end-to-end without creating any Python test scripts.
+
+### A) Swagger flow (fastest)
+
+1. Start the API:
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+2. Open Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+3. Test normal RAG:
+    - `POST /ingest` with one file (PDF/TXT/MP3/MP4)
+    - `POST /query` with:
+```json
+{
+   "question": "What is this file about?",
+   "top_k": 3
+}
+```
+
+4. Test agentic flow:
+    - `POST /agent` with:
+```json
+{
+   "question": "List documents, then summarize the most relevant one."
+}
+```
+    - Confirm response includes `plan`, `steps`, `trace_id`, `stop_reason`.
+    
+5. Test session memory:
+    - Reuse returned `session_id` in a second call:
+```json
+{
+   "question": "Now give me just 3 bullet points.",
+   "session_id": "<paste-session-id>"
+}
+```
+
+### b) Voice path check
+
+1. `POST /voice/transcribe` with an audio file.
+2. Send returned text to `/query` or `/agent`.
+3. `POST /voice/speak` with:
+```json
+{
+   "text": "Testing speech output",
+   "voice": "alloy"
+}
+```
+4. Expect MP3 audio bytes in the response.
+
+### Expected pass criteria
+
+1. `/query` returns `answer` + `sources`.
+2. `/agent` returns `answer` + `plan` + `steps` + `trace_id`.
+3. Reusing `session_id` changes follow-up behavior (short-term memory works).
+4. `/voice/transcribe` returns segment timestamps.
+5. `/voice/speak` returns `audio/mpeg` bytes.
+
 ## API Endpoints
 
 ### Ingest
@@ -110,7 +228,7 @@ Audio/video ingest runs Whisper automatically. Video also runs GPT-4o frame desc
 | POST   | `/query`              | RAG with timestamp citations for audio and video         |
 | POST   | `/query/visual`       | CLIP frame search over ingested video (Phase 8)          |
 | POST   | `/query/structured`   | Returns JSON with confidence and follow-up questions     |
-| POST   | `/agent`              | Tool-calling agent, loops until it has an answer         |
+| POST   | `/agent`              | Agentic loop: plans, calls tools, retries, traces, safe-stops |
 | POST   | `/evaluate`           | LLM-as-judge: faithfulness, relevance, completeness      |
 
 ### Voice
@@ -129,6 +247,29 @@ Audio/video ingest runs Whisper automatically. Video also runs GPT-4o frame desc
 - **Long-file handling** — ffmpeg slices files >20 MB; timestamps stitched back as absolute
 - **GPT-4o vision** — describes video frames; descriptions embedded and searchable
 - **CLIP embeddings** — images and text in same vector space; no description step needed
-- **Agent loop** — `bind_tools()` lets GPT decide which tools to call and loop until done
+- **Agentic loop** — planning, memory, retry, guardrails, observability (see below)
 - **LLM-as-judge** — structured evaluation of faithfulness, relevance, completeness
 - **Voice loop** — mic audio → Whisper → agent → TTS → speaker; same brain, new senses
+
+## Agentic Loop
+
+The `/agent` endpoint is not a single prompt — it is a constrained decision loop with five capabilities layered on top of `bind_tools()`:
+
+1. **Planning** — `plan_step` is the first tool the model is told to call for any non-trivial question. It records `goal`, `sub_steps`, `tool_sequence`, and `stop_condition`. The plan is returned in the response so you can inspect what the agent intended to do.
+2. **Memory** — short-term per-session conversation turns are auto-injected into the system prompt. Long-term facts are saved via `remember` and retrieved via `recall`, persisted in `storage/agent_memory.json`.
+3. **Retry/recovery** — every tool returns a standardized envelope `{status, error_type, retryable, payload}`. The loop retries `retryable=true` errors with backoff, then surfaces the failure to the model so it can pick a fallback or ask a clarifying question.
+4. **Guardrails** — hard caps: `MAX_ITERATIONS=6`, `MAX_TOOL_CALLS=12`, `MAX_WALL_SECONDS=45`, `TOOL_MAX_RETRIES=2`. If a cap is hit, the agent returns a safe-stop response with `stop_reason` and a next best action.
+5. **Observability** — every run gets a `trace_id`. Each step logs `tool`, `status`, `error_type`, `retries`, `latency_ms`, and token usage. Aggregate `elapsed_ms`, `tool_calls`, and `stop_reason` are returned to the client.
+
+### Agent tools
+
+| Tool                  | Purpose                                                    |
+|-----------------------|------------------------------------------------------------|
+| `plan_step`           | Commit to a plan before acting                             |
+| `search_documents`    | Semantic search over ingested content                      |
+| `list_documents`      | Enumerate ingested sources                                 |
+| `get_document_summary`| Preview a specific document                                |
+| `remember`            | Persist a compact fact for future runs                     |
+| `recall`              | Retrieve previously stored facts by keyword                |
+
+

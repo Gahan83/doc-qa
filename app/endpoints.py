@@ -225,13 +225,19 @@ async def query_visual(req: QueryRequest):
 async def agent_query(req: AgentRequest):
     """Tool-calling agent loop. GPT decides which tools to call."""
     try:
-        result = await run_in_threadpool(run_agent, req.question)
+        result = await run_in_threadpool(run_agent, req.question, req.session_id)
         return AgentResponse(
             answer=result["answer"],
+            plan=result.get("plan"),
             steps=[AgentStep(**s) for s in result["steps"]],
             iterations=result["iterations"],
+            tool_calls=result.get("tool_calls"),
             prompt_tokens=result["prompt_tokens"],
             completion_tokens=result["completion_tokens"],
+            trace_id=result.get("trace_id"),
+            session_id=result.get("session_id"),
+            stop_reason=result.get("stop_reason"),
+            elapsed_ms=result.get("elapsed_ms"),
         )
     except Exception as e:
         logger.exception("Agent failed")

@@ -36,6 +36,14 @@ class QueryResponse(BaseModel):
 
 class AgentRequest(BaseModel):
     question: str
+    session_id: Optional[str] = None
+
+
+class AgentPlan(BaseModel):
+    goal: str
+    sub_steps: list[str]
+    tool_sequence: list[str]
+    stop_condition: str
 
 
 class AgentStep(BaseModel):
@@ -44,14 +52,24 @@ class AgentStep(BaseModel):
     arguments: Optional[dict] = None
     result_preview: Optional[str] = None
     action: Optional[str] = None
+    status: Optional[str] = None
+    error_type: Optional[str] = None
+    retries: Optional[int] = None
+    latency_ms: Optional[int] = None
 
 
 class AgentResponse(BaseModel):
     answer: str
+    plan: Optional[AgentPlan] = None
     steps: list[AgentStep]
     iterations: int
+    tool_calls: Optional[int] = None
     prompt_tokens: int
     completion_tokens: int
+    trace_id: Optional[str] = None
+    session_id: Optional[str] = None
+    stop_reason: Optional[str] = None
+    elapsed_ms: Optional[int] = None
 
 
 class StructuredQueryRequest(BaseModel):
