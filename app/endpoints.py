@@ -25,6 +25,8 @@ from app.models import (
     AgentStep,
     EvalRequest,
     EvalResponse,
+    ExplainChunkRequest,
+    ExplainChunkResponse,
     IngestResponse,
     QueryRequest,
     QueryResponse,
@@ -37,6 +39,14 @@ from app.models import (
 )
 from app.retrieval import retrieve
 from app.structured import generate_structured
+from app.tokens import (
+    DEFAULT_MODEL,
+    _price_for,
+    build_usage,
+    count_tokens,
+    estimate_cost,
+    log_usage,
+)
 
 logger = logging.getLogger("doc-qa")
 
@@ -81,6 +91,7 @@ async def root():
             "/query", "/query/visual", "/query/structured",
             "/agent", "/evaluate",
             "/voice/transcribe", "/voice/speak",
+            "/explain-chunk",
             "/healthz",
         ],
     }
@@ -89,6 +100,29 @@ async def root():
 @router.get("/healthz")
 async def healthz():
     return {"status": "healthy"}
+
+
+# ---------------------------------------------------------------------------
+# LLM internals: explain a chunk (tiktoken token count + cost, no API call)
+# ---------------------------------------------------------------------------
+
+@router.post("/explain-chunk", response_model=ExplainChunkResponse)
+async def explain_chunk(req: ExplainChunkRequest):
+    """
+    Inspect a doc chunk before ingesting/querying.
+    Local tiktoken count + estimated input cost. No GPT call, no spend.
+    """
+    model = req.model or DEFAULT_MODEL
+    tokens = count_tokens(req.text, model)
+    price_in, price_out = _price_for(model)
+    return ExplainChunkResponse(
+        model=model,
+        char_count=len(req.text),
+        token_count=tokens,
+        estimated_input_cost_usd=estimate_cost(tokens, 0, model),
+        price_input_per_1m=price_in,
+        price_output_per_1m=price_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +208,14 @@ async def query(req: QueryRequest):
         if not chunks:
             raise HTTPException(404, "No documents ingested. POST to /ingest first.")
         result = await run_in_threadpool(generate, req.question, chunks)
+        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+        log_usage("/query", usage)
         return QueryResponse(
             answer=result["answer"],
             sources=_make_source_chunks(chunks),
             prompt_tokens=result["prompt_tokens"],
             completion_tokens=result["completion_tokens"],
+            usage=usage,
         )
     except HTTPException:
         raise
@@ -204,11 +241,14 @@ async def query_visual(req: QueryRequest):
         if not chunks:
             raise HTTPException(404, "No visual content ingested. POST to /ingest/visual first.")
         result = await run_in_threadpool(generate, req.question, chunks)
+        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+        log_usage("/query/visual", usage)
         return QueryResponse(
             answer=result["answer"],
             sources=_make_source_chunks(chunks),
             prompt_tokens=result["prompt_tokens"],
             completion_tokens=result["completion_tokens"],
+            usage=usage,
         )
     except HTTPException:
         raise
@@ -226,6 +266,8 @@ async def agent_query(req: AgentRequest):
     """Tool-calling agent loop. GPT decides which tools to call."""
     try:
         result = await run_in_threadpool(run_agent, req.question, req.session_id)
+        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+        log_usage("/agent", usage)
         return AgentResponse(
             answer=result["answer"],
             plan=result.get("plan"),
@@ -234,6 +276,7 @@ async def agent_query(req: AgentRequest):
             tool_calls=result.get("tool_calls"),
             prompt_tokens=result["prompt_tokens"],
             completion_tokens=result["completion_tokens"],
+            usage=usage,
             trace_id=result.get("trace_id"),
             session_id=result.get("session_id"),
             stop_reason=result.get("stop_reason"),
@@ -257,7 +300,9 @@ async def structured_query(req: StructuredQueryRequest):
         if not chunks:
             raise HTTPException(404, "No documents ingested.")
         result = await run_in_threadpool(generate_structured, req.question, chunks)
-        return StructuredAnswer(**result)
+        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+        log_usage("/query/structured", usage)
+        return StructuredAnswer(**result, usage=usage)
     except HTTPException:
         raise
     except Exception as e:
@@ -274,7 +319,10 @@ async def evaluate_answer(req: EvalRequest):
     """LLM-as-judge scoring: faithfulness, relevance, completeness."""
     try:
         result = await run_in_threadpool(evaluate, req.question, req.answer, req.context_chunks)
-        return EvalResponse(**result)
+        et = result["eval_tokens"]
+        usage = build_usage(et["prompt_tokens"], et["completion_tokens"])
+        log_usage("/evaluate", usage)
+        return EvalResponse(**result, usage=usage)
     except Exception as e:
         logger.exception("Evaluation failed")
         raise HTTPException(500, f"Evaluation failed: {e}")

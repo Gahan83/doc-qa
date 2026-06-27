@@ -2,6 +2,16 @@ from pydantic import BaseModel
 from typing import Optional
 
 
+# --- Token usage / cost (shared) ---
+
+class Usage(BaseModel):
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost_usd: float
+
+
 # --- Phase 1 Models ---
 
 class IngestResponse(BaseModel):
@@ -30,6 +40,7 @@ class QueryResponse(BaseModel):
     sources: list[SourceChunk]
     prompt_tokens: int
     completion_tokens: int
+    usage: Optional[Usage] = None
 
 
 # --- Phase 2 Models ---
@@ -66,6 +77,7 @@ class AgentResponse(BaseModel):
     tool_calls: Optional[int] = None
     prompt_tokens: int
     completion_tokens: int
+    usage: Optional[Usage] = None
     trace_id: Optional[str] = None
     session_id: Optional[str] = None
     stop_reason: Optional[str] = None
@@ -84,6 +96,7 @@ class StructuredAnswer(BaseModel):
     follow_up_questions: list[str]
     prompt_tokens: int
     completion_tokens: int
+    usage: Optional[Usage] = None
 
 
 class EvalRequest(BaseModel):
@@ -99,6 +112,7 @@ class EvalResponse(BaseModel):
     overall_score: float
     summary: str
     eval_tokens: dict
+    usage: Optional[Usage] = None
 
 
 # --- Phase 3/4: Audio/video ingest ---
@@ -128,3 +142,19 @@ class TranscribeResponse(BaseModel):
     language: str
     duration: float
     segments: list[TranscriptSegment]
+
+
+# --- LLM internals: explain a chunk ---
+
+class ExplainChunkRequest(BaseModel):
+    text: str
+    model: Optional[str] = None  # defaults to CHAT_MODEL
+
+
+class ExplainChunkResponse(BaseModel):
+    model: str
+    char_count: int
+    token_count: int
+    estimated_input_cost_usd: float   # cost if sent as prompt/context
+    price_input_per_1m: float
+    price_output_per_1m: float
