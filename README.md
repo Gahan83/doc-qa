@@ -272,4 +272,53 @@ The `/agent` endpoint is not a single prompt — it is a constrained decision lo
 | `remember`            | Persist a compact fact for future runs                     |
 | `recall`              | Retrieve previously stored facts by keyword                |
 
+## MCP Server
+
+Exposes the document corpus to MCP clients (e.g. Claude Desktop) via stdio — no HTTP layer. Defined in `app/mcp_server.py`.
+
+| Tool | Purpose |
+|------|---------|
+| `search_documents(query, top_k=3)` | Semantic search over ingested chunks → JSON `{source, text, score, timestamp}` |
+| `list_documents()`                  | List ingested files → JSON `{filename, chunk_count}` |
+
+Reuses the same retrieval/store logic as the REST API (`app/retrieval.retrieve`, `app/ingestion.load_store`), so MCP results match `POST /query`. Transport is **stdio**: the client launches `python -m app.mcp_server` and talks over stdin/stdout.
+
+### MCP prerequisites
+- `pip install -r requirements.txt` (includes `mcp`).
+- `.env` with Azure OpenAI creds (embeddings power search).
+- Documents already ingested (reuses the existing Chroma store).
+
+### Connect Claude Desktop
+1. Open (create if missing) the config file:
+   - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+   - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+2. Merge in the `doc-qa` block (adjust `command` to your `python.exe` and `cwd` to the project root):
+```json
+{
+  "mcpServers": {
+    "doc-qa": {
+      "command": "C:\\Users\\Gahan.K\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "c:\\Gahan\\Practice Projects for Work\\doc-qa"
+    }
+  }
+}
+```
+3. **Fully quit and reopen** Claude Desktop (not just close the window).
+4. New chat → tools icon lists `search_documents` and `list_documents` under `doc-qa`.
+
+### Try it in Claude Desktop
+- "What documents do you have access to?" → calls `list_documents`.
+- "Search my documents: how tall is the Eiffel Tower?" → calls `search_documents`.
+
+### Verify without Claude Desktop (MCP Inspector)
+Launch **from the project root** so `app` is importable and the relative `storage/chromadb` path resolves:
+```bash
+cd "c:\Gahan\Practice Projects for Work\doc-qa"
+npx @modelcontextprotocol/inspector python -m app.mcp_server
+```
+In the Inspector: Transport Type **STDIO** (pre-filled) → **Connect** → Tools tab → run `list_documents` / `search_documents`. There is **no URL** — stdio, not HTTP.
+
+> **Note:** MCP tool functions in `app/mcp_server.py` intentionally have no return-type annotation — FastMCP's structured-output schema builder is incompatible with the pinned `pydantic==2.9.2`. Results return as JSON text content, which Claude reads fine.
+
 
