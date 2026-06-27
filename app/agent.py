@@ -42,13 +42,23 @@ TOOL_MAX_RETRIES  = 2      # per tool call, on retryable errors
 TOOL_BACKOFF_SECS = (0.5, 1.5)   # exponential-ish backoff sequence
 
 
-AGENT_SYSTEM_PROMPT = """You are a document assistant agent with tools.
+AGENT_SYSTEM_PROMPT = """You are a document assistant agent with tools. You reason
+in the ReAct style: Thought -> Action -> Observation, looping until you can answer.
+
+REASONING RULE (important):
+- BEFORE every tool call, write a brief Thought in your message content: state WHY
+  you are calling this tool and WHAT you expect to learn. One or two sentences.
+- The tool call itself is the Action. The tool's returned envelope is the Observation.
+- Prefix each reasoning sentence that precedes a tool call with "Thought:".
+- When you have enough Observations to satisfy the stop_condition, reply with ONLY
+  the final answer — clean prose, NO "Thought:" prefix and no tool call.
+- Never leave the reasoning empty when you act — always verbalize the Thought.
 
 Workflow:
 1. For ANY question that needs more than a single lookup, call `plan_step` FIRST.
    - Provide: goal, sub_steps, tool_sequence, stop_condition.
    - Skip planning ONLY for trivial single-shot questions.
-2. Execute your plan by calling tools in order.
+2. Execute your plan by calling tools in order, narrating a Thought before each.
 3. Each tool returns an envelope: {status, error_type, retryable, payload}.
    - On status="error", read error_type. If retryable, the runtime already
      retried — pick a fallback strategy or ask a clarifying question.
@@ -61,6 +71,18 @@ Rules:
 - If retrieval returns nothing relevant, say so plainly.
 - Prefer ONE clarifying question over a wrong answer when intent is ambiguous.
 """
+
+
+def _summarize_observation(envelope: dict) -> str:
+    """Compact Observation string from a tool envelope for the ReAct trace."""
+    status = envelope.get("status", "unknown")
+    if status == "ok":
+        payload = envelope.get("payload")
+        if isinstance(payload, list):
+            return f"ok: {len(payload)} result(s)"
+        text = json.dumps(payload, default=str)
+        return f"ok: {text[:200]}"
+    return f"error[{envelope.get('error_type')}]: {envelope.get('payload', {}).get('message', '')[:160]}"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +159,7 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
     ]
 
     steps: list[dict] = []
+    scratchpad: list[str] = []   # ordered Thought/Action/Observation trace
     plan: dict | None = None
     total_prompt_tokens = 0
     total_completion_tokens = 0
@@ -159,13 +182,21 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
         total_prompt_tokens += usage.get("input_tokens", 0)
         total_completion_tokens += usage.get("output_tokens", 0)
 
+        # --- ReAct: Thought (model's reasoning emitted in message content) ---
+        thought = (response.content or "").strip() or "(no explicit reasoning provided)"
+        scratchpad.append(f"Thought {iteration}: {thought}")
+        logger.info("agent.thought trace_id=%s iter=%d thought=%s",
+                    trace_id, iteration, thought[:300])
+
         if not response.tool_calls:
             steps.append({
                 "iteration": iteration,
+                "thought": thought,
                 "action": "final_answer",
                 "latency_ms": llm_ms,
                 "status": "ok",
             })
+            scratchpad.append(f"Answer: {thought}")
             answer = response.content
             append_turn(session_id, "user", question)
             append_turn(session_id, "assistant", answer)
@@ -180,6 +211,7 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
                 "steps": steps,
                 "iterations": iteration,
                 "tool_calls": tool_calls_used,
+                "scratchpad": scratchpad,
                 "prompt_tokens": total_prompt_tokens,
                 "completion_tokens": total_completion_tokens,
                 "trace_id": trace_id,
@@ -203,6 +235,11 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
             tool_name = tool_call["name"]
             args = tool_call["args"]
 
+            # --- ReAct: Action ---
+            scratchpad.append(f"Action {iteration}: {tool_name}({json.dumps(args, default=str)[:160]})")
+            logger.info("agent.action trace_id=%s iter=%d tool=%s args=%s",
+                        trace_id, iteration, tool_name, json.dumps(args, default=str)[:200])
+
             t_tool = time.monotonic()
             envelope, retries, err_type = _invoke_tool_with_retry(tool_name, args)
             tool_ms = int((time.monotonic() - t_tool) * 1000)
@@ -214,10 +251,16 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
             payload_json = json.dumps(envelope, default=str)
             messages.append(ToolMessage(content=payload_json, tool_call_id=tool_call["id"]))
 
+            # --- ReAct: Observation ---
+            observation = _summarize_observation(envelope)
+            scratchpad.append(f"Observation {iteration}: {observation}")
+
             step_record = {
                 "iteration": iteration,
+                "thought": thought,
                 "tool": tool_name,
                 "arguments": args,
+                "observation": observation,
                 "status": envelope.get("status"),
                 "error_type": err_type,
                 "retries": retries,
@@ -226,8 +269,8 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
             }
             steps.append(step_record)
             logger.info(
-                "agent.tool trace_id=%s iter=%d tool=%s status=%s retries=%d ms=%d",
-                trace_id, iteration, tool_name, envelope.get("status"), retries, tool_ms,
+                "agent.observation trace_id=%s iter=%d tool=%s status=%s retries=%d ms=%d obs=%s",
+                trace_id, iteration, tool_name, envelope.get("status"), retries, tool_ms, observation[:200],
             )
 
         if stop_reason == "tool_call_budget_exceeded":
@@ -254,6 +297,7 @@ def run_agent(question: str, session_id: str | None = None) -> dict:
         "steps": steps,
         "iterations": len(steps),
         "tool_calls": tool_calls_used,
+        "scratchpad": scratchpad,
         "prompt_tokens": total_prompt_tokens,
         "completion_tokens": total_completion_tokens,
         "trace_id": trace_id,

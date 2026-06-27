@@ -59,8 +59,10 @@ class AgentPlan(BaseModel):
 
 class AgentStep(BaseModel):
     iteration: int
-    tool: Optional[str] = None
+    thought: Optional[str] = None       # ReAct: model's reasoning before acting (CoT scratchpad)
+    tool: Optional[str] = None          # ReAct: Action
     arguments: Optional[dict] = None
+    observation: Optional[str] = None   # ReAct: Observation (tool result summary)
     result_preview: Optional[str] = None
     action: Optional[str] = None
     status: Optional[str] = None
@@ -75,6 +77,7 @@ class AgentResponse(BaseModel):
     steps: list[AgentStep]
     iterations: int
     tool_calls: Optional[int] = None
+    scratchpad: Optional[list[str]] = None   # ReAct: ordered Thought/Action/Observation trace
     prompt_tokens: int
     completion_tokens: int
     usage: Optional[Usage] = None

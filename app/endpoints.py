@@ -274,6 +274,7 @@ async def agent_query(req: AgentRequest):
             steps=[AgentStep(**s) for s in result["steps"]],
             iterations=result["iterations"],
             tool_calls=result.get("tool_calls"),
+            scratchpad=result.get("scratchpad"),
             prompt_tokens=result["prompt_tokens"],
             completion_tokens=result["completion_tokens"],
             usage=usage,
