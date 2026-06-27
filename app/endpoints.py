@@ -16,6 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from app.agent import run_agent
+from app.agent_multi import run_multi_agent
 from app.agent_scratch import run_agent_scratch
 from app.evaluation import evaluate
 from app.generation import generate
@@ -26,6 +27,7 @@ from app.models import (
     AgentResponse,
     AgentStep,
     EvalRequest,
+    MultiAgentResponse,
     EvalResponse,
     ExplainChunkRequest,
     ExplainChunkResponse,
@@ -91,7 +93,7 @@ async def root():
         "endpoints": [
             "/ingest", "/ingest/visual",
             "/query", "/query/visual", "/query/structured",
-            "/agent", "/agent/scratch", "/agent/compare", "/evaluate",
+            "/agent", "/agent/scratch", "/agent/compare", "/agent/multi", "/evaluate",
             "/voice/transcribe", "/voice/speak",
             "/explain-chunk",
             "/healthz",
@@ -304,6 +306,31 @@ async def agent_scratch_query(req: AgentRequest):
     except Exception as e:
         logger.exception("Scratch agent failed")
         raise HTTPException(500, f"Scratch agent failed: {e}")
+
+
+@router.post("/agent/multi", response_model=MultiAgentResponse)
+async def agent_multi(req: QueryRequest):
+    """Orchestrator dispatches to retriever_agent (search) + synthesizer_agent (write).
+    Trace shows every inter-agent handoff."""
+    try:
+        top_k = req.top_k or int(os.getenv("TOP_K", 3))
+        result = await run_in_threadpool(run_multi_agent, req.question, top_k)
+        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+        log_usage("/agent/multi", usage)
+        return MultiAgentResponse(
+            answer=result["answer"],
+            refined_query=result["refined_query"],
+            handoffs=result["handoffs"],
+            sources=_make_source_chunks(result["sources"]),
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            usage=usage,
+            trace_id=result["trace_id"],
+            elapsed_ms=result["elapsed_ms"],
+        )
+    except Exception as e:
+        logger.exception("Multi-agent failed")
+        raise HTTPException(500, f"Multi-agent failed: {e}")
 
 
 @router.post("/agent/compare", response_model=AgentCompareResponse)

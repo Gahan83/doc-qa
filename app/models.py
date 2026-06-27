@@ -94,6 +94,27 @@ class AgentCompareResponse(BaseModel):
     comparison: dict   # quick side-by-side diff (tokens, iterations, tool_calls, answers)
 
 
+class Handoff(BaseModel):
+    step: int
+    from_agent: str
+    to_agent: str
+    action: str
+    summary: str
+    latency_ms: int
+
+
+class MultiAgentResponse(BaseModel):
+    answer: str
+    refined_query: str
+    handoffs: list[Handoff]
+    sources: list[SourceChunk]
+    prompt_tokens: int
+    completion_tokens: int
+    usage: Optional[Usage] = None
+    trace_id: str
+    elapsed_ms: int
+
+
 class StructuredQueryRequest(BaseModel):
     question: str
     top_k: Optional[int] = 3
