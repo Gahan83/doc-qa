@@ -16,10 +16,12 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from app.agent import run_agent
+from app.agent_scratch import run_agent_scratch
 from app.evaluation import evaluate
 from app.generation import generate
 from app.ingestion import AUDIO_EXTS, VIDEO_EXTS, ingest_file
 from app.models import (
+    AgentCompareResponse,
     AgentRequest,
     AgentResponse,
     AgentStep,
@@ -89,7 +91,7 @@ async def root():
         "endpoints": [
             "/ingest", "/ingest/visual",
             "/query", "/query/visual", "/query/structured",
-            "/agent", "/evaluate",
+            "/agent", "/agent/scratch", "/agent/compare", "/evaluate",
             "/voice/transcribe", "/voice/speak",
             "/explain-chunk",
             "/healthz",
@@ -261,31 +263,69 @@ async def query_visual(req: QueryRequest):
 # Agent
 # ---------------------------------------------------------------------------
 
+def _to_agent_response(result: dict, route: str) -> AgentResponse:
+    """Build an AgentResponse + usage block from either agent's result dict."""
+    usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
+    log_usage(route, usage)
+    return AgentResponse(
+        answer=result["answer"],
+        plan=result.get("plan"),
+        steps=[AgentStep(**s) for s in result["steps"]],
+        iterations=result["iterations"],
+        tool_calls=result.get("tool_calls"),
+        scratchpad=result.get("scratchpad"),
+        prompt_tokens=result["prompt_tokens"],
+        completion_tokens=result["completion_tokens"],
+        usage=usage,
+        trace_id=result.get("trace_id"),
+        session_id=result.get("session_id"),
+        stop_reason=result.get("stop_reason"),
+        elapsed_ms=result.get("elapsed_ms"),
+    )
+
+
 @router.post("/agent", response_model=AgentResponse)
 async def agent_query(req: AgentRequest):
-    """Tool-calling agent loop. GPT decides which tools to call."""
+    """Tool-calling agent loop (LangChain). GPT decides which tools to call."""
     try:
         result = await run_in_threadpool(run_agent, req.question, req.session_id)
-        usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
-        log_usage("/agent", usage)
-        return AgentResponse(
-            answer=result["answer"],
-            plan=result.get("plan"),
-            steps=[AgentStep(**s) for s in result["steps"]],
-            iterations=result["iterations"],
-            tool_calls=result.get("tool_calls"),
-            scratchpad=result.get("scratchpad"),
-            prompt_tokens=result["prompt_tokens"],
-            completion_tokens=result["completion_tokens"],
-            usage=usage,
-            trace_id=result.get("trace_id"),
-            session_id=result.get("session_id"),
-            stop_reason=result.get("stop_reason"),
-            elapsed_ms=result.get("elapsed_ms"),
-        )
+        return _to_agent_response(result, "/agent")
     except Exception as e:
         logger.exception("Agent failed")
         raise HTTPException(500, f"Agent failed: {e}")
+
+
+@router.post("/agent/scratch", response_model=AgentResponse)
+async def agent_scratch_query(req: AgentRequest):
+    """Same ReAct loop, ZERO frameworks — raw Azure OpenAI SDK (app/agent_scratch.py)."""
+    try:
+        result = await run_in_threadpool(run_agent_scratch, req.question, req.session_id)
+        return _to_agent_response(result, "/agent/scratch")
+    except Exception as e:
+        logger.exception("Scratch agent failed")
+        raise HTTPException(500, f"Scratch agent failed: {e}")
+
+
+@router.post("/agent/compare", response_model=AgentCompareResponse)
+async def agent_compare(req: AgentRequest):
+    """Run LangChain agent and the from-scratch agent on the same question; diff them."""
+    try:
+        lc_result = await run_in_threadpool(run_agent, req.question, req.session_id)
+        sc_result = await run_in_threadpool(run_agent_scratch, req.question, req.session_id)
+        lc = _to_agent_response(lc_result, "/agent/compare:langchain")
+        sc = _to_agent_response(sc_result, "/agent/compare:scratch")
+        comparison = {
+            "iterations":   {"langchain": lc.iterations, "scratch": sc.iterations},
+            "tool_calls":   {"langchain": lc.tool_calls, "scratch": sc.tool_calls},
+            "total_tokens": {"langchain": lc.usage.total_tokens, "scratch": sc.usage.total_tokens},
+            "cost_usd":     {"langchain": lc.usage.estimated_cost_usd, "scratch": sc.usage.estimated_cost_usd},
+            "elapsed_ms":   {"langchain": lc.elapsed_ms, "scratch": sc.elapsed_ms},
+            "answers_equal": lc.answer.strip() == sc.answer.strip(),
+        }
+        return AgentCompareResponse(question=req.question, langchain=lc, scratch=sc, comparison=comparison)
+    except Exception as e:
+        logger.exception("Agent compare failed")
+        raise HTTPException(500, f"Agent compare failed: {e}")
 
 
 # ---------------------------------------------------------------------------

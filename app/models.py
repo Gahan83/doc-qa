@@ -87,6 +87,13 @@ class AgentResponse(BaseModel):
     elapsed_ms: Optional[int] = None
 
 
+class AgentCompareResponse(BaseModel):
+    question: str
+    langchain: AgentResponse
+    scratch: AgentResponse
+    comparison: dict   # quick side-by-side diff (tokens, iterations, tool_calls, answers)
+
+
 class StructuredQueryRequest(BaseModel):
     question: str
     top_k: Optional[int] = 3
