@@ -11,14 +11,15 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from app.agent import run_agent
 from app.agent_multi import run_multi_agent
 from app.agent_scratch import run_agent_scratch
-from app.evaluation import evaluate
+from app.evaluation import batch_evaluate, evaluate
+from app.observability import notify_query
 from app.generation import generate
 from app.ingestion import AUDIO_EXTS, VIDEO_EXTS, ingest_file
 from app.models import (
@@ -26,6 +27,8 @@ from app.models import (
     AgentRequest,
     AgentResponse,
     AgentStep,
+    BatchEvalRequest,
+    BatchEvalResponse,
     EvalRequest,
     MultiAgentResponse,
     EvalResponse,
@@ -93,7 +96,8 @@ async def root():
         "endpoints": [
             "/ingest", "/ingest/visual",
             "/query", "/query/visual", "/query/structured",
-            "/agent", "/agent/scratch", "/agent/compare", "/agent/multi", "/evaluate",
+            "/agent", "/agent/scratch", "/agent/compare", "/agent/multi",
+            "/evaluate", "/evaluate/batch",
             "/voice/transcribe", "/voice/speak",
             "/explain-chunk",
             "/healthz",
@@ -204,8 +208,12 @@ async def ingest_visual(file: UploadFile = File(...)):
 # ---------------------------------------------------------------------------
 
 @router.post("/query", response_model=QueryResponse)
-async def query(req: QueryRequest):
-    """RAG over all ingested content. Audio/video answers cite timestamps."""
+async def query(req: QueryRequest, background: BackgroundTasks):
+    """RAG over all ingested content. Audio/video answers cite timestamps.
+
+    After responding, a background task logs the query cost (storage/query_costs.csv)
+    and, if SLACK_WEBHOOK_URL is set, posts the answer + eval score to Slack.
+    """
     try:
         top_k  = req.top_k or int(os.getenv("TOP_K", 3))
         chunks = await run_in_threadpool(retrieve, req.question, top_k)
@@ -214,6 +222,7 @@ async def query(req: QueryRequest):
         result = await run_in_threadpool(generate, req.question, chunks)
         usage = build_usage(result["prompt_tokens"], result["completion_tokens"])
         log_usage("/query", usage)
+        background.add_task(notify_query, "/query", req.question, result["answer"], usage, chunks)
         return QueryResponse(
             answer=result["answer"],
             sources=_make_source_chunks(chunks),
@@ -394,6 +403,18 @@ async def evaluate_answer(req: EvalRequest):
     except Exception as e:
         logger.exception("Evaluation failed")
         raise HTTPException(500, f"Evaluation failed: {e}")
+
+
+@router.post("/evaluate/batch", response_model=BatchEvalResponse)
+async def evaluate_batch(req: BatchEvalRequest):
+    """Score many Q/A/context items in one run; export results to CSV."""
+    try:
+        items = [i.model_dump() for i in req.items]
+        result = await run_in_threadpool(batch_evaluate, items, req.export_csv, req.csv_path)
+        return BatchEvalResponse(**result)
+    except Exception as e:
+        logger.exception("Batch evaluation failed")
+        raise HTTPException(500, f"Batch evaluation failed: {e}")
 
 
 # ---------------------------------------------------------------------------

@@ -146,6 +146,20 @@ class EvalResponse(BaseModel):
     usage: Optional[Usage] = None
 
 
+class BatchEvalRequest(BaseModel):
+    items: list[EvalRequest]
+    export_csv: bool = True
+    csv_path: Optional[str] = None
+
+
+class BatchEvalResponse(BaseModel):
+    results: list[dict]
+    count: int
+    avg_overall: float
+    total_eval_tokens: dict
+    csv_path: Optional[str] = None
+
+
 # --- Phase 3/4: Audio/video ingest ---
 
 class AudioIngestResponse(BaseModel):
