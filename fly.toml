@@ -1,0 +1,29 @@
+# Fly.io config for doc-qa. Create the app once with `fly launch --no-deploy`
+# (or `fly apps create doc-qa`), then set secrets, then `fly deploy`.
+app = "doc-qa"
+primary_region = "fra"   # pick one near your Azure OpenAI region
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"   # sentence-transformers / torch are heavy; bump to 2gb if OOM
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  AZURE_API_VERSION = "2024-12-01-preview"
+
+# NOTE: storage/chromadb is ephemeral here — ingested data resets on redeploy/
+# restart. For persistence add a volume:
+#   fly volumes create doc_qa_storage --size 1 --region fra
+# [mounts]
+#   source = "doc_qa_storage"
+#   destination = "/app/storage"

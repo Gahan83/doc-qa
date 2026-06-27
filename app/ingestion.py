@@ -17,6 +17,7 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".opus"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 splitter = RecursiveCharacterTextSplitter(
     chunk_size=CHUNK_SIZE * 5,
@@ -64,6 +65,11 @@ def ingest_file(filepath: str) -> int:
         from app.video_loader import load_video
         describe = os.getenv("VISUAL_MODE", "describe") in ("describe", "both")
         return _store_media_chunks(load_video(filepath, describe_frames=describe))
+
+    # --- Image (multimodal) ---
+    if suffix in IMAGE_EXTS:
+        from app.image_loader import load_image
+        return _store_media_chunks(load_image(filepath))
 
     # --- PDF / text ---
     if suffix == ".pdf":

@@ -21,7 +21,7 @@ from app.agent_scratch import run_agent_scratch
 from app.evaluation import batch_evaluate, evaluate
 from app.observability import notify_query
 from app.generation import generate
-from app.ingestion import AUDIO_EXTS, VIDEO_EXTS, ingest_file
+from app.ingestion import AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, ingest_file
 from app.models import (
     AgentCompareResponse,
     AgentRequest,
@@ -59,12 +59,13 @@ logger = logging.getLogger("doc-qa")
 
 router = APIRouter()
 
-ALLOWED_EXTS = {".txt", ".pdf"} | AUDIO_EXTS | VIDEO_EXTS
+ALLOWED_EXTS = {".txt", ".pdf"} | AUDIO_EXTS | VIDEO_EXTS | IMAGE_EXTS
 
 UPLOAD_DIRS = {
     "doc":   Path("data/docs"),
     "audio": Path("data/audio"),
     "video": Path("data/video"),
+    "image": Path("data/images"),
 }
 for d in UPLOAD_DIRS.values():
     d.mkdir(parents=True, exist_ok=True)
@@ -75,6 +76,8 @@ def _upload_dir(suffix: str) -> Path:
         return UPLOAD_DIRS["audio"]
     if suffix in VIDEO_EXTS:
         return UPLOAD_DIRS["video"]
+    if suffix in IMAGE_EXTS:
+        return UPLOAD_DIRS["image"]
     return UPLOAD_DIRS["doc"]
 
 
@@ -141,9 +144,10 @@ async def explain_chunk(req: ExplainChunkRequest):
 async def ingest(file: UploadFile = File(...)):
     """
     Upload PDF, TXT, audio (.mp3 .wav .m4a .ogg .flac .aac .opus),
-    or video (.mp4 .mov .avi .mkv .webm).
+    video (.mp4 .mov .avi .mkv .webm), or image (.png .jpg .jpeg .gif .webp .bmp).
     Audio → Whisper transcript chunks.
     Video → Whisper transcript + GPT-4o frame description chunks (Phase 6+7).
+    Image → GPT-4o vision description chunk (multimodal).
     """
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTS:

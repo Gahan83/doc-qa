@@ -214,12 +214,12 @@ uvicorn app.main:app --reload --port 8000
 
 ### Ingest
 
-| Method | Endpoint         | Description                                                       |
-|--------|------------------|-------------------------------------------------------------------|
-| POST   | `/ingest`        | Upload PDF, TXT, MP3, WAV, M4A, OGG, FLAC, MP4, MOV, MKV, WEBM    |
-| POST   | `/ingest/visual` | Embed video frames via CLIP into a separate Chroma collection     |
+| Method | Endpoint         | Description                                                                |
+|--------|------------------|----------------------------------------------------------------------------|
+| POST   | `/ingest`        | Upload PDF, TXT, audio, video, or image (PNG/JPG/GIF/WEBP/BMP)              |
+| POST   | `/ingest/visual` | Embed video frames via CLIP into a separate Chroma collection              |
 
-Audio/video ingest runs Whisper automatically. Video also runs GPT-4o frame descriptions if `VISUAL_MODE=describe`.
+Audio/video ingest runs Whisper automatically. Video also runs GPT-4o frame descriptions if `VISUAL_MODE=describe`. Images run GPT-4o vision (`app/image_loader.py`) → a description chunk stored like audio/video, so image content is searchable via `/query` and the agents.
 
 ### Query
 
@@ -320,5 +320,37 @@ npx @modelcontextprotocol/inspector python -m app.mcp_server
 In the Inspector: Transport Type **STDIO** (pre-filled) → **Connect** → Tools tab → run `list_documents` / `search_documents`. There is **no URL** — stdio, not HTTP.
 
 > **Note:** MCP tool functions in `app/mcp_server.py` intentionally have no return-type annotation — FastMCP's structured-output schema builder is incompatible with the pinned `pydantic==2.9.2`. Results return as JSON text content, which Claude reads fine.
+
+## Deployment (Fly.io + GitHub Actions)
+
+CI/CD is defined in `.github/workflows/ci.yml`:
+
+- **test** (every push + PR): byte-compiles all modules and builds the Docker image — a fast gate that catches syntax/import errors without installing the heavy ML stack.
+- **deploy** (push to `main` only): runs `flyctl deploy --remote-only` using the `FLY_API_TOKEN` secret.
+
+The `Dockerfile` installs `ffmpeg` (audio/video ingest) and honors `$PORT` (injected by Fly.io/Railway). `fly.toml` holds the Fly app config.
+
+### One-time setup
+1. Install flyctl and sign in: `fly auth login`.
+2. Create the app (no deploy yet): `fly apps create doc-qa` (match the name in `fly.toml`).
+3. Set runtime secrets (NOT committed):
+```bash
+fly secrets set \
+  OPENAI_API_KEY=... \
+  AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com \
+  CHAT_MODEL=gpt-5.4-mini \
+  EMBED_MODEL=text-embedding-3-small
+# optional: SLACK_WEBHOOK_URL, PRICE_INPUT_PER_1M, PRICE_OUTPUT_PER_1M
+```
+4. Add a CI deploy token to GitHub repo secrets as `FLY_API_TOKEN`:
+   `fly tokens create deploy -x 999999h` → copy into **Settings → Secrets and variables → Actions**.
+
+### Deploy
+- **Automatic:** push to `main` → GitHub Actions builds + deploys.
+- **Manual:** `fly deploy` from the project root.
+
+Live URL: `https://doc-qa.fly.dev` (or your app name). Verify: `GET /healthz`, then `POST /ingest` an image and `POST /query` its content.
+
+> **Storage is ephemeral** by default — ingested data resets on redeploy/restart. For persistence, create a Fly volume and uncomment the `[mounts]` block in `fly.toml` (see the file). Or swap Chroma for a hosted vector DB.
 
 

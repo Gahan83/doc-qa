@@ -4,9 +4,10 @@ FROM python:3.12-slim
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (ffmpeg required for audio/video ingest)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
@@ -23,5 +24,6 @@ EXPOSE 8000
 # Set environment variables (override in production as needed)
 ENV PYTHONUNBUFFERED=1
 
-# Start FastAPI app with Uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start FastAPI app with Uvicorn.
+# Shell form so $PORT (injected by Fly.io / Railway) is honored; default 8000.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
